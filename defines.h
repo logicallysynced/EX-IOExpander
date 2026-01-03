@@ -168,6 +168,8 @@ struct ServoData {
 #define EXIOINITA 0xE8    // Flag to send analogue pin info
 #define EXIOPINS 0xE9     // Flag we need to send pin counts
 #define EXIOWRAN 0xEA     // Flag we're receiving an analogue write (PWM)
+#define EXIOSHIFTIN  0xEB
+#define EXIOSHIFTOUT 0xEC
 #define EXIOERR 0xEF      // Flag something has errored to send to device driver
 
 /////////////////////////////////////////////////////////////////////////////////////

@@ -23,6 +23,7 @@
 #include "i2c_functions.h"
 #include "display_functions.h"
 #include "pin_io_functions.h"
+#include "shiftio_functions.h"
 
 uint8_t numAnaloguePins = 0;  // Init with 0, will be overridden by config
 uint8_t numDigitalPins = 0;   // Init with 0, will be overridden by config
@@ -30,20 +31,24 @@ uint8_t numPWMPins = 0;  // Number of PWM capable pins
 bool setupComplete = false;   // Flag when initial configuration/setup has been received
 uint8_t outboundFlag;   // Used to determine what data to send back to the CommandStation
 byte commandBuffer[3];    // Command buffer to interact with device driver
-byte responseBuffer[1];   // Buffer to send single response back to device driver
 uint8_t numReceivedPins = 0;
+
+static const uint8_t EXIO_SHIFT_MAX_BYTES = 16;   // up to 16 bytes (128 bits) safely under I2C 32-byte limit
+byte responseBuffer[1 + EXIO_SHIFT_MAX_BYTES];    // [status][payload...]
+uint8_t responseLength = 0;
 
 /*
 * Function triggered when CommandStation is sending data to this device.
 */
 void receiveEvent(int numBytes) {
-  if (numBytes == 0) {
-    return;
+  if (numBytes <= 0) return;
+
+  byte buffer[32];
+  if (numBytes > 32) numBytes = 32;
+  for (uint8_t i = 0; i < numBytes; i++) {
+    buffer[i] = Wire.read();
   }
-  byte buffer[numBytes];
-  for (uint8_t byte = 0; byte < numBytes; byte++) {
-    buffer[byte] = Wire.read();   // Read all received bytes into our buffer array
-  }
+
   switch(buffer[0]) {
     // Initial configuration start, must be 2 bytes
     case EXIOINIT:
@@ -151,6 +156,76 @@ void receiveEvent(int numBytes) {
         responseBuffer[0] = EXIOERR;
       }
       break;
+    case EXIOSHIFTIN: {
+      outboundFlag = EXIOSHIFTIN;
+
+      // Payload: [cmd][clkPin][latchPin][dataPin][nBytes]
+      if (numBytes != 5) {
+        responseBuffer[0] = EXIOERR;
+        responseLength = 1;
+        break;
+      }
+
+      uint8_t clk   = buffer[1];
+      uint8_t latch = buffer[2];
+      uint8_t data  = buffer[3];
+      uint8_t n     = buffer[4];
+
+      USB_SERIAL.print("SHIFTIN clk=");
+      USB_SERIAL.print(clk);
+      USB_SERIAL.print(" latch=");
+      USB_SERIAL.print(latch);
+      USB_SERIAL.print(" data=");
+      USB_SERIAL.print(data);
+      USB_SERIAL.print(" n=");
+      USB_SERIAL.println(n);
+
+      if (n == 0 || n > EXIO_SHIFT_MAX_BYTES) {
+        responseBuffer[0] = EXIOERR;
+        responseLength = 1;
+        break;
+      }
+
+      responseBuffer[0] = EXIORDY;
+      exioShiftInBytes(clk, latch, data, &responseBuffer[1], n);
+
+      responseLength = 1 + n;
+      break;
+    }
+
+    case EXIOSHIFTOUT: {
+      outboundFlag = EXIOSHIFTOUT;
+
+      // Payload: [cmd][clkPin][latchPin][dataPin][nBytes][byte0..byteN-1]
+      if (numBytes < 6) {
+        responseBuffer[0] = EXIOERR;
+        responseLength = 1;
+        break;
+      }
+
+      uint8_t clk   = buffer[1];
+      uint8_t latch = buffer[2];
+      uint8_t data  = buffer[3];
+      uint8_t n     = buffer[4];
+
+      if (n == 0 || n > EXIO_SHIFT_MAX_BYTES) {
+        responseBuffer[0] = EXIOERR;
+        responseLength = 1;
+        break;
+      }
+
+      if (numBytes != (5 + n)) {
+        responseBuffer[0] = EXIOERR;
+        responseLength = 1;
+        break;
+      }
+
+      exioShiftOutBytes(clk, latch, data, &buffer[5], n);
+
+      responseBuffer[0] = EXIORDY;
+      responseLength = 1;
+      break;
+    }
     default:
       break;
   }
@@ -196,6 +271,10 @@ void requestEvent() {
       break;
     case EXIOWRD:
       Wire.write(responseBuffer, 1);
+      break;
+    case EXIOSHIFTIN:
+    case EXIOSHIFTOUT:
+      Wire.write(responseBuffer, responseLength);
       break;
     default:
       break;
