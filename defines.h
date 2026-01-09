@@ -86,6 +86,21 @@
 #define USB_SERIAL SerialUSB  // Most SAMD21 clones use native USB on the SAMD21G18 variants
 #endif
 
+// -----------------------------------------------------------------------------
+// Optional TCP mode settings (from myConfig.h)
+// -----------------------------------------------------------------------------
+#ifndef IP_PORT
+#define IP_PORT 2560
+#endif
+
+#ifndef ENABLE_WIFI
+#define ENABLE_WIFI false
+#endif
+
+#ifndef ENABLE_ETHERNET
+#define ENABLE_ETHERNET false
+#endif
+
 /////////////////////////////////////////////////////////////////////////////////////
 //  Include myConfig.h or use the example
 //
@@ -168,6 +183,8 @@ struct ServoData {
 #define EXIOINITA 0xE8    // Flag to send analogue pin info
 #define EXIOPINS 0xE9     // Flag we need to send pin counts
 #define EXIOWRAN 0xEA     // Flag we're receiving an analogue write (PWM)
+#define EXIOSHIFTIN 0xEB
+#define EXIOSHIFTOUT 0xEC
 #define EXIOERR 0xEF      // Flag something has errored to send to device driver
 
 /////////////////////////////////////////////////////////////////////////////////////
