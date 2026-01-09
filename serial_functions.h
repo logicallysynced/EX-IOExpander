@@ -32,5 +32,8 @@ void setPullupTesting();
 void serialCaseR();
 void serialCaseT();
 void serialCaseW(unsigned long parameter);
+void serialCaseN();                                  // Network status
+void serialCaseL();                                  // Latency stats
+void serialCaseC(const char* ssid, const char* pass); // Set WiFi creds + reconnect
 
 #endif

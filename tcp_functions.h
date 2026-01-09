@@ -27,4 +27,22 @@ void tcpLoop();
 // Stop active TCP client (server continues)
 void tcpEnd();
 
-#endif
+//
+// Optional TCP diagnostics / serial helpers
+//
+
+// Print current TCP transport and connection details (best effort)
+void tcpPrintNetworkStatus();
+
+// Attempt runtime WiFi reconnect with provided credentials (best effort)
+// Returns true if connected at end, false otherwise.
+// If DONT_TOUCH_WIFI_CONF is defined, will refuse and return false.
+bool tcpWifiReconnect(const char* ssid, const char* pass);
+
+// Latency stats (time spent handling one complete frame: read+dispatch)
+uint32_t tcpGetFrameCount();
+uint32_t tcpGetLastLatencyUs();
+uint32_t tcpGetAvgLatencyUs();
+uint32_t tcpGetMaxLatencyUs();
+
+#endif // TCP_FUNCTIONS_H
