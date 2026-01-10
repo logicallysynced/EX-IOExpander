@@ -23,6 +23,8 @@
   #define __has_include(x) 0
 #endif
 
+//#define DIAG_IO
+
 // ------------------------- Transport selection ------------------------------
 // Priority order:
 //   1) Ethernet
@@ -66,7 +68,6 @@
 
 #endif
 
-
 // ------------------------- Server/client objects ----------------------------
 
 #if defined(EXIO_TCP_WIFI)
@@ -77,24 +78,32 @@
   static EthernetClient _client;
 #endif
 
-// ------------------------- Latency stats ------------------------------------
-
-static uint32_t _tcpFrameCount = 0;
-static uint32_t _tcpLastLatencyUs = 0;
-static uint32_t _tcpMaxLatencyUs = 0;
-static uint64_t _tcpTotalLatencyUs = 0;
-
 // ------------------------- State mirroring I2C ------------------------------
 
 static uint8_t outboundFlag = 0;
+static byte commandBuffer[3];
 
-// IMPORTANT: do NOT define numReceivedPins here.
-// It is already defined in i2c_functions.cpp, and should be declared extern in globals.h.
-// extern uint8_t numReceivedPins;  <-- in globals.h
+// IMPORTANT: must NOT be defined in multiple .cpp files.
+// If you already define this in i2c_functions.cpp, remove it here and make it extern in globals.h.
+extern uint8_t numReceivedPins;
 
 static const uint8_t EXIO_SHIFT_MAX_BYTES = 16;
 static byte responseBuffer[1 + EXIO_SHIFT_MAX_BYTES]; // [status][payload...]
 static uint8_t responseLength = 0;
+
+// ------------------------- Latency stats ------------------------------------
+
+static uint32_t _tcpFrameCount = 0;
+static uint32_t _tcpLastUs = 0;
+static uint32_t _tcpMaxUs = 0;
+static uint64_t _tcpTotalUs = 0;
+
+// ------------------------- Network config storage ---------------------------
+
+static uint8_t _ipBytes[4]     = IP_ADDRESS;
+static uint8_t _subnetBytes[4] = SUBNET_MASK;
+static uint8_t _gwBytes[4]     = GATEWAY_ADDRESS;
+static uint8_t _dnsBytes[4]    = DNS_ADDRESS;
 
 // ------------------------- Small portability yield --------------------------
 
@@ -104,6 +113,10 @@ static inline void _tinyYield() {
 #else
   delay(0);
 #endif
+}
+
+static inline IPAddress _ipFromBytes(const uint8_t b[4]) {
+  return IPAddress(b[0], b[1], b[2], b[3]);
 }
 
 // ------------------------- Framing helpers ----------------------------------
@@ -129,14 +142,49 @@ static bool _readExact(Stream& s, uint8_t* buf, size_t len, uint32_t timeoutMs) 
   return true;
 }
 
-static void _writeFrame(Stream& s, uint8_t cmd, const uint8_t* payload, uint8_t len) {
-  uint8_t hdr[2] = { cmd, len };
-  s.write(hdr, 2);
-  if (len && payload) s.write(payload, len);
+static bool _writeAll(Stream& s, const uint8_t* data, size_t len, uint32_t timeoutMs) {
+  uint32_t start = millis();
+  size_t sent = 0;
+
+  while (sent < len) {
+    if ((millis() - start) > timeoutMs) return false;
+
+    // Stream::write can be short; handle it.
+    size_t n = s.write(data + sent, len - sent);
+
+    if (n == 0) {
+      #ifdef DIAG_IO
+        USB_SERIAL.println(F("TCP: write returned 0"));
+      #endif
+      _tinyYield();
+      continue;
+    }
+    sent += n;
+  }
+  return true;
 }
 
-static void _writeAck(Stream& s, uint8_t cmd, uint8_t statusByte) {
-  _writeFrame(s, cmd, &statusByte, 1);
+static bool _writeFrame(Stream& s, uint8_t cmd, const uint8_t* payload, uint8_t len) {
+  // Write header first (2 bytes)
+  uint8_t hdr[2] = { cmd, len };
+
+  if (!_writeAll(s, hdr, 2, 2000)) return false;
+
+  // Write payload as-is (do NOT copy into a stack frame)
+  if (len && payload) {
+    if (!_writeAll(s, payload, len, 2000)) return false;
+  }
+
+  // Give WiFi stack time
+  _tinyYield();
+  delay(2);       // I'd start with 2ms on WiFiS3; bump to 5ms if needed
+  _tinyYield();
+
+  return true;
+}
+
+static bool _writeAck(Stream& s, uint8_t cmd, uint8_t statusByte) {
+  return _writeFrame(s, cmd, &statusByte, 1);
 }
 
 // ------------------------- Network bring-up ---------------------------------
@@ -151,27 +199,48 @@ bool tcpEnabled() {
 
 #if defined(EXIO_TCP_WIFI)
 
+static bool _wifiApplyStaticConfig() {
+  // Best-effort: WiFi.config(ip, dns, gateway, subnet) is common across WiFi libs.
+  // If not supported by a particular core, it will fail to compile; in that case,
+  // comment this out for that core and rely on DHCP.
+  IPAddress ip     = _ipFromBytes(_ipBytes);
+  IPAddress dns    = _ipFromBytes(_dnsBytes);
+  IPAddress gw     = _ipFromBytes(_gwBytes);
+  IPAddress subnet = _ipFromBytes(_subnetBytes);
+
+  // Many WiFi libraries return bool; some return void. Handle both.
+  #if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)
+    return WiFi.config(ip, gw, subnet, dns);
+  #else
+    // WiFiS3 / others often use: config(ip, dns, gateway, subnet)
+    // If your core expects (ip, dns, gateway, subnet), this matches.
+    WiFi.config(ip, dns, gw, subnet);
+    return true;
+  #endif
+}
+
 static bool _wifiEnsureConnected() {
-  // If user says "don't touch", only honor that on ESP cores where an external
-  // sketch/framework might already be managing WiFi. On WiFiS3 boards, you
-  // generally need to call WiFi.begin() yourself.
+  // Honor "do not touch" only on ESP cores. On WiFiS3 boards you typically must begin().
 #if defined(DONT_TOUCH_WIFI_CONF) && (defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266))
   return (WiFi.status() == WL_CONNECTED);
 #else
   if (WiFi.status() == WL_CONNECTED) return true;
 
-  // STA mode where supported
   #if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)
     WiFi.mode(WIFI_STA);
   #endif
 
-  // Hostname (only where supported)
+  // Hostname (best-effort; not all cores support this)
   #if defined(ARDUINO_ARCH_ESP32)
     if (strlen(WIFI_HOSTNAME) > 0) WiFi.setHostname(WIFI_HOSTNAME);
   #elif defined(ARDUINO_ARCH_ESP8266)
     if (strlen(WIFI_HOSTNAME) > 0) WiFi.hostname(WIFI_HOSTNAME);
   #endif
-  // WiFiS3: no hostname API (ignore)
+
+  // Apply static config if USE_DHCP=false
+  #if defined(USE_DHCP) && (USE_DHCP == false)
+    (void)_wifiApplyStaticConfig();
+  #endif
 
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
@@ -181,10 +250,10 @@ static bool _wifiEnsureConnected() {
     delay(100);
   }
 
-  // Give DHCP a moment to populate localIP() on some stacks
+  // Give DHCP/static a moment to populate localIP()
   for (uint8_t i = 0; i < 20; i++) {
     IPAddress ip = WiFi.localIP();
-    if (ip[0] != 0 || ip[1] != 0 || ip[2] != 0 || ip[3] != 0) return true;
+    if (ip[0] || ip[1] || ip[2] || ip[3]) return true;
     delay(100);
   }
 
@@ -192,35 +261,30 @@ static bool _wifiEnsureConnected() {
 #endif
 }
 
-#endif  // EXIO_TCP_WIFI
+#endif // EXIO_TCP_WIFI
 
 #if defined(EXIO_TCP_ETH)
 
-/*************  ✨ Windsurf Command ⭐  *************/
-/**
- * @brief Initialises the Ethernet interface.
- *
- * This function is called when the TCP server is started. It sets up the
- * Ethernet interface using the MAC address and IP address defined in
- * the globals.h file.
- *
- * @note Ethernet.begin() is called with the MAC address only, and if this
- * call fails, the function will call Ethernet.begin() again with both the MAC
- * address and IP address.
- *
- * @see Ethernet.begin()
- */
-/*******  afc1f365-e1a5-40a8-82ec-42a435222ec7  *******/
 static void _ethBegin() {
   byte mac[] = MAC_ADDRESS;
 
-  // Globals should define IP_ADDRESS as either IPAddress(...) or {a,b,c,d} style.
-  IPAddress ip = IP_ADDRESS;
+  IPAddress ip     = _ipFromBytes(_ipBytes);
+  IPAddress dns    = _ipFromBytes(_dnsBytes);
+  IPAddress gw     = _ipFromBytes(_gwBytes);
+  IPAddress subnet = _ipFromBytes(_subnetBytes);
 
-  int ok = Ethernet.begin(mac);
-  if (ok == 0) {
-    Ethernet.begin(mac, ip);
+  bool ok = false;
+
+  #if defined(USE_DHCP) && (USE_DHCP == true)
+    int dhcp = Ethernet.begin(mac);
+    ok = (dhcp != 0);
+  #endif
+
+  if (!ok) {
+    // Static fallback or forced static
+    Ethernet.begin(mac, ip, dns, gw, subnet);
   }
+
   delay(250);
 }
 
@@ -229,12 +293,21 @@ static void _ethBegin() {
 // ------------------------- Protocol handlers --------------------------------
 
 static void _handleCommand(Stream& s, uint8_t cmd, const uint8_t* payload, uint8_t len) {
+
+  #ifdef DIAG_IO
+    USB_SERIAL.print(F("TCP: rx cmd=0x"));
+    USB_SERIAL.print(cmd, HEX);
+    USB_SERIAL.print(F(" len="));
+    USB_SERIAL.println(len);
+  #endif
+
+
   switch (cmd) {
 
     case EXIOINIT: {
       if (len != 3) {
         displayEventFlag = 2;
-        uint8_t resp[3] = { 0, 0, 0 };
+        uint8_t resp[3] = { EXIOPINS, numDigitalPins, numAnaloguePins };
         _writeFrame(s, EXIOPINS, resp, 3);
         return;
       }
@@ -255,41 +328,158 @@ static void _handleCommand(Stream& s, uint8_t cmd, const uint8_t* payload, uint8
       outboundFlag = EXIOINIT;
       displayEvent = EXIOINIT;
 
+      //uint8_t resp[3] = { EXIOPINS, numDigitalPins, 0 };
       uint8_t resp[3] = { EXIOPINS, numDigitalPins, numAnaloguePins };
-      _writeFrame(s, EXIOPINS, resp, 3);
+      //_writeFrame(s, EXIOPINS, resp, 3);
+
+      if (!_writeFrame(s, EXIOPINS, resp, 3)) {
+        #ifdef DIAG_IO
+          USB_SERIAL.println(F("TCP: tx failed, dropping client [EXIOINIT]"));
+        #endif
+        _client.stop();
+        return;
+      }
+
       return;
     }
 
     case EXIOINITA: {
       outboundFlag = EXIOINITA;
-      if (!setupComplete) { _writeFrame(s, EXIOINITA, nullptr, 0); return; }
-      _writeFrame(s, EXIOINITA, analoguePinMap, (uint8_t)numAnaloguePins);
+
+      // Protocol guarantee:
+      // If numAnaloguePins > 0, we MUST return that many bytes
+      // even if setup is not complete yet.
+      static uint8_t emptyMap[32] = {0}; // max analogue pins safeguard
+
+      const uint8_t n = (uint8_t)numAnaloguePins;
+
+      // Always send exactly n bytes. If setup isn't complete OR map isn't ready,
+      // send an all-zero placeholder map.
+      const uint8_t* map = analoguePinMap;
+      if (!setupComplete || map == nullptr) {
+        map = emptyMap;
+      }
+
+      
+      if (!_writeFrame(s, EXIOINITA, map, n)) {
+        #ifdef DIAG_IO
+          USB_SERIAL.println(F("TCP: tx failed, dropping client [EXIOINITA]"));
+        #endif
+        _client.stop();
+        return;
+      }
+      
+      
+      /*
+      #ifdef DIAG_IO
+      USB_SERIAL.print(F("TCP: INITA map bytes: "));
+      for (uint8_t i = 0; i < n; i++) {
+        USB_SERIAL.print(map[i], HEX);
+        USB_SERIAL.print(' ');
+      }
+      USB_SERIAL.println();
+      #endif
+
+      bool ok = _writeFrame(s, EXIOINITA, map, n);
+      #ifdef DIAG_IO
+      USB_SERIAL.print(F("TCP: EXIOINITA tx n="));
+      USB_SERIAL.print(n);
+      USB_SERIAL.print(F(" ok="));
+      USB_SERIAL.println(ok ? 1 : 0);
+      #endif
+      if (!ok) { _client.stop(); return; }
+      */
+      
+
       return;
     }
 
     case EXIORDAN: {
       outboundFlag = EXIORDAN;
-      if (!setupComplete) { _writeFrame(s, EXIORDAN, nullptr, 0); return; }
-      _writeFrame(s, EXIORDAN, analoguePinStates, (uint8_t)analoguePinBytes);
+
+      // CommandStation expects exactly numAnaloguePins*2 bytes every time.
+      const uint8_t need = (uint8_t)(numAnaloguePins * 2);
+
+      // Provide a safe zero-filled fallback.
+      static uint8_t emptyStates[64] = {0}; // supports up to 32 analogue pins (32*2=64)
+
+      const uint8_t* buf = analoguePinStates;
+
+      // If we're not ready or the buffer/bytecount isn't sane, send zeros of the expected size.
+      if (!setupComplete || buf == nullptr || analoguePinBytes < need) {
+        buf = emptyStates;
+      }
+
+      #ifdef DIAG_IO
+
+        USB_SERIAL.print(F("TCP: EXIORDAN tx need="));
+        USB_SERIAL.print(need);
+        USB_SERIAL.print(F(" analoguePinBytes="));
+        USB_SERIAL.print((int)analoguePinBytes);
+        USB_SERIAL.print(F(" setupComplete="));
+        USB_SERIAL.println(setupComplete ? 1 : 0);
+
+      #endif
+
+      //_writeFrame(s, EXIORDAN, buf, need);
+
+      if (!_writeFrame(s, EXIORDAN, buf, need)) {
+        #ifdef DIAG_IO
+          USB_SERIAL.println(F("TCP: tx failed, dropping client [EXIORDAN]"));
+        #endif
+        _client.stop();
+        return;
+      }
+
       return;
     }
 
+
     case EXIORDD: {
       outboundFlag = EXIORDD;
-      if (!setupComplete) { _writeFrame(s, EXIORDD, nullptr, 0); return; }
-      _writeFrame(s, EXIORDD, digitalPinStates, (uint8_t)digitalPinBytes);
+
+      const uint8_t need = (uint8_t)((numDigitalPins + 7) / 8);
+      static uint8_t emptyDig[32] = {0}; // supports up to 256 digital pins (256/8=32)
+
+      const uint8_t* buf = digitalPinStates;
+      if (!setupComplete || buf == nullptr || digitalPinBytes < need) {
+        buf = emptyDig;
+      }
+
+      if (!_writeFrame(s, EXIORDD, buf, need)) {
+        #ifdef DIAG_IO
+          USB_SERIAL.println(F("TCP: tx failed, dropping client [EXIORDD]"));
+        #endif
+        _client.stop();
+        return;
+      }
+
+      //_writeFrame(s, EXIORDD, buf, need);
       return;
     }
 
     case EXIOVER: {
       outboundFlag = EXIOVER;
-      _writeFrame(s, EXIOVER, versionBuffer, 3);
+      //_writeFrame(s, EXIOVER, versionBuffer, 3);
+
+      if (!_writeFrame(s, EXIOVER, versionBuffer, 3)) {
+        #ifdef DIAG_IO
+          USB_SERIAL.println(F("TCP: tx failed, dropping client [EXIOVER]"));
+        #endif
+        _client.stop();
+        return;
+      }
+
       return;
     }
 
     case EXIODPUP: {
       outboundFlag = EXIODPUP;
-      if (len != 2) { displayEvent = EXIODPUP; _writeAck(s, EXIODPUP, EXIOERR); return; }
+      if (len != 2) {
+        displayEvent = EXIODPUP;
+        _writeAck(s, EXIODPUP, EXIOERR);
+        return;
+      }
       uint8_t pin = payload[0];
       bool pullup = payload[1] ? true : false;
       bool ok = enableDigitalInput(pin, pullup);
@@ -299,7 +489,11 @@ static void _handleCommand(Stream& s, uint8_t cmd, const uint8_t* payload, uint8
 
     case EXIOWRD: {
       outboundFlag = EXIOWRD;
-      if (len != 2) { displayEvent = EXIOWRD; _writeAck(s, EXIOWRD, EXIOERR); return; }
+      if (len != 2) {
+        displayEvent = EXIOWRD;
+        _writeAck(s, EXIOWRD, EXIOERR);
+        return;
+      }
       uint8_t pin = payload[0];
       bool state = payload[1] ? true : false;
       bool ok = writeDigitalOutput(pin, state);
@@ -309,7 +503,10 @@ static void _handleCommand(Stream& s, uint8_t cmd, const uint8_t* payload, uint8
 
     case EXIOENAN: {
       outboundFlag = EXIOENAN;
-      if (len != 1) { _writeAck(s, EXIOENAN, EXIOERR); return; }
+      if (len != 1) {
+        _writeAck(s, EXIOENAN, EXIOERR);
+        return;
+      }
       uint8_t pin = payload[0];
       bool ok = enableAnalogue(pin);
       _writeAck(s, EXIOENAN, ok ? EXIORDY : EXIOERR);
@@ -318,7 +515,11 @@ static void _handleCommand(Stream& s, uint8_t cmd, const uint8_t* payload, uint8
 
     case EXIOWRAN: {
       outboundFlag = EXIOWRAN;
-      if (len != 6) { displayEvent = EXIOWRAN; _writeAck(s, EXIOWRAN, EXIOERR); return; }
+      if (len != 6) {
+        displayEvent = EXIOWRAN;
+        _writeAck(s, EXIOWRAN, EXIOERR);
+        return;
+      }
       uint8_t pin = payload[0];
       uint16_t value = (uint16_t)((payload[2] << 8) | payload[1]);
       uint8_t profile = payload[3];
@@ -361,17 +562,27 @@ static void _handleCommand(Stream& s, uint8_t cmd, const uint8_t* payload, uint8
     case EXIOSHIFTOUT: {
       outboundFlag = EXIOSHIFTOUT;
 
-      if (len < 4) { _writeAck(s, EXIOSHIFTOUT, EXIOERR); return; }
+      if (len < 4) {
+        _writeAck(s, EXIOSHIFTOUT, EXIOERR);
+        return;
+      }
 
       uint8_t clk   = payload[0];
       uint8_t latch = payload[1];
       uint8_t data  = payload[2];
       uint8_t n     = payload[3];
 
-      if (n == 0 || n > EXIO_SHIFT_MAX_BYTES) { _writeAck(s, EXIOSHIFTOUT, EXIOERR); return; }
-      if (len != (uint8_t)(4 + n)) { _writeAck(s, EXIOSHIFTOUT, EXIOERR); return; }
+      if (n == 0 || n > EXIO_SHIFT_MAX_BYTES) {
+        _writeAck(s, EXIOSHIFTOUT, EXIOERR);
+        return;
+      }
+      if (len != (uint8_t)(4 + n)) {
+        _writeAck(s, EXIOSHIFTOUT, EXIOERR);
+        return;
+      }
 
       exioShiftOutBytes(clk, latch, data, &payload[4], n);
+
       _writeAck(s, EXIOSHIFTOUT, EXIORDY);
       return;
     }
@@ -379,6 +590,16 @@ static void _handleCommand(Stream& s, uint8_t cmd, const uint8_t* payload, uint8
     default:
       return;
   }
+}
+
+// ------------------------- Rebind helpers -----------------------------------
+
+static void _serverRebind() {
+#if defined(EXIO_TCP_WIFI) || defined(EXIO_TCP_ETH)
+  if (_client) _client.stop();
+  // On many cores, calling begin() again is fine to rebind.
+  _server.begin();
+#endif
 }
 
 // ------------------------- Public API ---------------------------------------
@@ -416,20 +637,30 @@ void tcpBegin() {
 void tcpLoop() {
 #if defined(EXIO_TCP_WIFI) || defined(EXIO_TCP_ETH)
 
-  if (!_client || !_client.connected()) {
-    _client = _server.available();
-    if (_client && _client.connected()) {
-      USB_SERIAL.println(F("TCP: client connected"));
-    }
-    return;
+  if (_client && !_client.connected()) {
+    USB_SERIAL.println(F("TCP: client disconnected"));
+    _client.stop();
+    _client = WiFiClient();   // <--- hard reset the underlying handle
   }
 
-  while (_client.available() >= 2) {
-    uint8_t hdr[2];
-
-    if (!_readExact(_client, hdr, 2, 25)) {
+  if (!_client || !_client.connected()) {
+    WiFiClient incoming = _server.available();
+    if (incoming) {
       _client.stop();
-      USB_SERIAL.println(F("TCP: header timeout -> disconnect"));
+      _client = incoming;
+      USB_SERIAL.println(F("TCP: client connected"));
+    } else {
+      return;
+    }
+  }
+
+
+  while (_client.available() >= 2) {
+    const uint32_t t0 = micros();
+
+    uint8_t hdr[2];
+    if (!_readExact(_client, hdr, 2, 250)) {
+      _client.stop();
       return;
     }
 
@@ -443,36 +674,26 @@ void tcpLoop() {
         else _tinyYield();
       }
       _client.stop();
-      USB_SERIAL.println(F("TCP: frame too large -> disconnect"));
       return;
     }
 
     if (len > 0) {
-      if (!_readExact(_client, payload, len, 100)) {
+      if (!_readExact(_client, payload, len, 250)) {
         _client.stop();
-        USB_SERIAL.println(F("TCP: payload timeout -> disconnect"));
         return;
       }
-
-      uint32_t t0 = micros();
       _handleCommand(_client, cmd, payload, len);
-      uint32_t dt = micros() - t0;
-
-      _tcpFrameCount++;
-      _tcpLastLatencyUs = dt;
-      _tcpTotalLatencyUs += dt;
-      if (dt > _tcpMaxLatencyUs) _tcpMaxLatencyUs = dt;
-
     } else {
-      uint32_t t0 = micros();
       _handleCommand(_client, cmd, nullptr, 0);
-      uint32_t dt = micros() - t0;
-
-      _tcpFrameCount++;
-      _tcpLastLatencyUs = dt;
-      _tcpTotalLatencyUs += dt;
-      if (dt > _tcpMaxLatencyUs) _tcpMaxLatencyUs = dt;
     }
+
+    const uint32_t t1 = micros();
+    const uint32_t dt = (uint32_t)(t1 - t0);
+
+    _tcpFrameCount++;
+    _tcpLastUs = dt;
+    _tcpTotalUs += dt;
+    if (dt > _tcpMaxUs) _tcpMaxUs = dt;
 
     _tinyYield();
   }
@@ -486,115 +707,186 @@ void tcpEnd() {
 #endif
 }
 
-// ------------------------- Serial helper implementations --------------------
+// ------------------------- Diagnostics APIs ---------------------------------
 
 void tcpPrintNetworkStatus() {
-  USB_SERIAL.println(F("=== Network Status ==="));
+#if defined(EXIO_TCP_WIFI) || defined(EXIO_TCP_ETH)
 
-  if (!tcpEnabled()) {
-    USB_SERIAL.println(F("TCP: disabled/not compiled"));
-    return;
-  }
+  USB_SERIAL.println(F("=== TCP Network Status ==="));
 
-  USB_SERIAL.print(F("Port: "));
-  USB_SERIAL.println(IP_PORT);
-
+  // Transport
 #if defined(EXIO_TCP_ETH)
-  USB_SERIAL.println(F("Transport: Ethernet (Active)"));
-  USB_SERIAL.print(F("Local IP: "));
-  USB_SERIAL.println(Ethernet.localIP());
-
-  // Link status is not universally supported across all Ethernet libs.
-  #if defined(ETHERNET_LINK_STATUS)
-    USB_SERIAL.print(F("Link: "));
-    auto ls = Ethernet.linkStatus();
-    if (ls == LinkON) USB_SERIAL.println(F("ON"));
-    else if (ls == LinkOFF) USB_SERIAL.println(F("OFF"));
-    else USB_SERIAL.println(F("UNKNOWN"));
-  #endif
-
+  USB_SERIAL.println(F("Transport: Ethernet"));
 #elif defined(EXIO_TCP_WIFI)
-  USB_SERIAL.println(F("Transport: WiFi (Active)"));
-  USB_SERIAL.print(F("WiFi status: "));
-  USB_SERIAL.println((WiFi.status() == WL_CONNECTED) ? F("CONNECTED") : F("NOT CONNECTED"));
+  USB_SERIAL.println(F("Transport: WiFi"));
+#else
+  USB_SERIAL.println(F("Transport: (unknown)"));
+#endif
 
+  // IP details + port
+#if defined(EXIO_TCP_ETH)
+  IPAddress ip  = Ethernet.localIP();
+  IPAddress sn  = Ethernet.subnetMask();
+  IPAddress gw  = Ethernet.gatewayIP();
+  IPAddress dns = Ethernet.dnsServerIP();
+#elif defined(EXIO_TCP_WIFI)
+  IPAddress ip  = WiFi.localIP();
+  // Some cores provide these; others don't. Guard with fallbacks.
+  IPAddress sn(0,0,0,0);
+  IPAddress gw(0,0,0,0);
+  IPAddress dns(0,0,0,0);
+
+  // Arduino WiFi API commonly provides these on many cores:
+  // (If your core doesn't, you'll get a compile error here—see notes below.)
+  sn  = WiFi.subnetMask();
+  gw  = WiFi.gatewayIP();
+  dns = WiFi.dnsIP();
+#endif
+
+  USB_SERIAL.print(F("Local IP:  ")); USB_SERIAL.println(ip);
+  USB_SERIAL.print(F("Subnet:    ")); USB_SERIAL.println(sn);
+  USB_SERIAL.print(F("Gateway:   ")); USB_SERIAL.println(gw);
+  USB_SERIAL.print(F("DNS:       ")); USB_SERIAL.println(dns);
+  USB_SERIAL.print(F("Port:      ")); USB_SERIAL.println(IP_PORT);
+
+  // Link / WiFi details (best-effort)
+#if defined(EXIO_TCP_ETH)
+  #ifdef ETHERNET_LINK_STATUS
+    USB_SERIAL.print(F("Link:      "));
+    auto ls = Ethernet.linkStatus();
+    if (ls == LinkON) USB_SERIAL.println(F("up"));
+    else if (ls == LinkOFF) USB_SERIAL.println(F("down"));
+    else USB_SERIAL.println(F("unknown"));
+  #endif
+#elif defined(EXIO_TCP_WIFI)
+  USB_SERIAL.print(F("WiFi:      "));
   if (WiFi.status() == WL_CONNECTED) {
-    USB_SERIAL.print(F("Local IP: "));
-    USB_SERIAL.println(WiFi.localIP());
-
-    USB_SERIAL.print(F("SSID: "));
-    USB_SERIAL.println(WiFi.SSID());
-
-    USB_SERIAL.print(F("RSSI: "));
-    USB_SERIAL.print(WiFi.RSSI());
-    USB_SERIAL.println(F(" dBm"));
+    USB_SERIAL.print(F("connected, SSID="));
+    USB_SERIAL.print(WiFi.SSID());
+    USB_SERIAL.print(F(", RSSI="));
+    USB_SERIAL.println(WiFi.RSSI());
+  } else {
+    USB_SERIAL.println(F("not connected"));
   }
 #endif
 
-#if defined(EXIO_TCP_WIFI) || defined(EXIO_TCP_ETH)
-  USB_SERIAL.print(F("Client connected: "));
-  USB_SERIAL.println((_client && _client.connected()) ? F("YES") : F("NO"));
+  // Client status
+  USB_SERIAL.print(F("Client:    "));
+  USB_SERIAL.println(_client.connected() ? F("connected") : F("none"));
+
+  USB_SERIAL.println(F("=========================="));
+
+#else
+  USB_SERIAL.println(F("TCP not enabled/available in this build."));
 #endif
 }
 
-// ------------------------- Latency getters ----------------------------------
 
 uint32_t tcpGetFrameCount() { return _tcpFrameCount; }
-uint32_t tcpGetLastLatencyUs() { return _tcpLastLatencyUs; }
-
+uint32_t tcpGetLastLatencyUs() { return _tcpLastUs; }
+uint32_t tcpGetMaxLatencyUs() { return _tcpMaxUs; }
 uint32_t tcpGetAvgLatencyUs() {
   if (_tcpFrameCount == 0) return 0;
-  return (uint32_t)(_tcpTotalLatencyUs / (uint64_t)_tcpFrameCount);
+  return (uint32_t)(_tcpTotalUs / _tcpFrameCount);
 }
 
-uint32_t tcpGetMaxLatencyUs() { return _tcpMaxLatencyUs; }
-
-// ------------------------- WiFi reconnect -----------------------------------
+// ------------------------- WiFi runtime reconnect ---------------------------
 
 bool tcpWifiReconnect(const char* ssid, const char* pass) {
 #if defined(EXIO_TCP_WIFI)
-  #ifdef DONT_TOUCH_WIFI_CONF
-    (void)ssid; (void)pass;
-    USB_SERIAL.println(F("WiFi reconnect refused: DONT_TOUCH_WIFI_CONF is defined"));
-    return false;
-  #else
-    if (!ssid || ssid[0] == '\0') {
-      USB_SERIAL.println(F("WiFi reconnect: SSID missing"));
-      return false;
-    }
+#if defined(DONT_TOUCH_WIFI_CONF)
+  USB_SERIAL.println(F("WiFi reconnect refused: DONT_TOUCH_WIFI_CONF is defined."));
+  return false;
+#else
+  if (!ssid || !ssid[0]) return false;
 
-    // Best-effort disconnect
-    #if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)
-      WiFi.disconnect(true);
-      delay(100);
-    #else
-      // WiFiS3 has disconnect() but signature differs by core versions; keep it minimal
-      WiFi.disconnect();
-      delay(100);
-    #endif
+  if (_client) _client.stop();
 
-    if (pass && pass[0] != '\0') {
-      WiFi.begin(ssid, pass);
-    } else {
-      WiFi.begin(ssid);
-    }
+  WiFi.disconnect();
+  delay(250);
 
-    uint32_t start = millis();
-    while (WiFi.status() != WL_CONNECTED) {
-      if ((millis() - start) > WIFI_CONNECT_TIMEOUT) {
-        USB_SERIAL.println(F("WiFi reconnect: timeout"));
-        return false;
-      }
-      delay(50);
-    }
-
-    USB_SERIAL.print(F("WiFi reconnect: connected, IP="));
-    USB_SERIAL.println(WiFi.localIP());
-    return true;
+  // Re-apply static config if USE_DHCP=false
+  #if defined(USE_DHCP) && (USE_DHCP == false)
+    (void)_wifiApplyStaticConfig();
   #endif
+
+  WiFi.begin(ssid, pass ? pass : "");
+
+  uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED) {
+    if ((millis() - start) > WIFI_CONNECT_TIMEOUT) return false;
+    delay(100);
+  }
+
+  // Wait for IP
+  for (uint8_t i = 0; i < 20; i++) {
+    IPAddress ip = WiFi.localIP();
+    if (ip[0] || ip[1] || ip[2] || ip[3]) break;
+    delay(100);
+  }
+
+  _serverRebind();
+  return true;
+#endif
 #else
   (void)ssid; (void)pass;
-  USB_SERIAL.println(F("WiFi reconnect: WiFi not compiled/enabled"));
+  return false;
+#endif
+}
+
+// ------------------------- Static network set/apply -------------------------
+
+bool tcpSetStaticNetwork(const uint8_t ip[4],
+                         const uint8_t subnet[4],
+                         const uint8_t gateway[4],
+                         const uint8_t dns[4]) {
+#if defined(EXIO_TCP_WIFI) || defined(EXIO_TCP_ETH)
+  if (!ip || !subnet || !gateway || !dns) return false;
+
+  memcpy(_ipBytes, ip, 4);
+  memcpy(_subnetBytes, subnet, 4);
+  memcpy(_gwBytes, gateway, 4);
+  memcpy(_dnsBytes, dns, 4);
+
+  // Apply immediately
+#if defined(EXIO_TCP_ETH)
+  _ethBegin();
+  _serverRebind();
+  return true;
+#elif defined(EXIO_TCP_WIFI)
+#if defined(DONT_TOUCH_WIFI_CONF)
+  USB_SERIAL.println(F("Static IP set stored, but not applied: DONT_TOUCH_WIFI_CONF is defined."));
+  return false;
+#else
+  if (_client) _client.stop();
+
+  // Reconnect using existing SSID/PASS macros
+  WiFi.disconnect();
+  delay(250);
+
+  (void)_wifiApplyStaticConfig();
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED) {
+    if ((millis() - start) > WIFI_CONNECT_TIMEOUT) return false;
+    delay(100);
+  }
+
+  // Wait for IP
+  for (uint8_t i = 0; i < 20; i++) {
+    IPAddress lip = WiFi.localIP();
+    if (lip[0] || lip[1] || lip[2] || lip[3]) break;
+    delay(100);
+  }
+
+  _serverRebind();
+  return true;
+#endif
+#endif
+
+#else
+  (void)ip; (void)subnet; (void)gateway; (void)dns;
   return false;
 #endif
 }

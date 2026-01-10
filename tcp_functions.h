@@ -13,23 +13,30 @@
 #define TCP_FUNCTIONS_H
 
 #include <Arduino.h>
+#include <stdint.h>
 
-// Public API
 bool tcpEnabled();
+
 void tcpBegin();
 void tcpLoop();
 void tcpEnd();
 
-// Serial/diagnostic helpers (used by new serial commands)
+// --- Serial / diagnostics helpers ---
 void tcpPrintNetworkStatus();
 
-// Latency stats (µs) for framed command handling
 uint32_t tcpGetFrameCount();
 uint32_t tcpGetLastLatencyUs();
 uint32_t tcpGetAvgLatencyUs();
 uint32_t tcpGetMaxLatencyUs();
 
-// Runtime WiFi reconnect (best-effort; no-op if WiFi not compiled)
+// WiFi-only helper (returns false if not supported / not enabled)
 bool tcpWifiReconnect(const char* ssid, const char* pass);
+
+// Static network config (works for Ethernet + WiFi where supported).
+// Applies immediately: reconnect WiFi / restart Ethernet + TCP server.
+bool tcpSetStaticNetwork(const uint8_t ip[4],
+                         const uint8_t subnet[4],
+                         const uint8_t gateway[4],
+                         const uint8_t dns[4]);
 
 #endif

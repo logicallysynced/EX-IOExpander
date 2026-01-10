@@ -118,6 +118,27 @@
 #define ENABLE_ETHERNET false
 #endif
 
+#ifndef USE_DHCP
+#define USE_DHCP true
+#endif
+
+#ifndef IP_ADDRESS
+#define IP_ADDRESS { 192, 168, 1, 200 }
+#endif
+
+#ifndef SUBNET_MASK
+#define SUBNET_MASK { 255, 255, 255, 0 }
+#endif
+
+#ifndef GATEWAY_ADDRESS
+#define GATEWAY_ADDRESS { 192, 168, 1, 1 }
+#endif
+
+#ifndef DNS_ADDRESS
+#define DNS_ADDRESS { 192, 168, 1, 1 }
+#endif
+
+
 /////////////////////////////////////////////////////////////////////////////////////
 //  Include myConfig.h or use the example
 //

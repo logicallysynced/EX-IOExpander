@@ -29,6 +29,44 @@ bool newSerialData = false;
 const byte numSerialChars = 80;
 char serialInputChars[numSerialChars];
 
+static bool _parseIp4(const char* s, uint8_t out[4]) {
+  if (!s) return false;
+
+  // Extract up to 4 numbers separated by any non-digit characters
+  uint16_t vals[4] = {0,0,0,0};
+  uint8_t idx = 0;
+  bool inNum = false;
+  uint16_t cur = 0;
+
+  for (const char* p = s; *p; p++) {
+    if (*p >= '0' && *p <= '9') {
+      inNum = true;
+      cur = (uint16_t)(cur * 10 + (uint16_t)(*p - '0'));
+      if (cur > 255) return false;
+    } else {
+      if (inNum) {
+        if (idx >= 4) return false;
+        vals[idx++] = cur;
+        cur = 0;
+        inNum = false;
+      }
+    }
+  }
+  if (inNum) {
+    if (idx >= 4) return false;
+    vals[idx++] = cur;
+  }
+
+  if (idx != 4) return false;
+
+  out[0] = (uint8_t)vals[0];
+  out[1] = (uint8_t)vals[1];
+  out[2] = (uint8_t)vals[2];
+  out[3] = (uint8_t)vals[3];
+  return true;
+}
+
+
 /*
 * Function to read and process serial input for runtime config
 * Format: <X ...>
@@ -85,6 +123,23 @@ void processSerialInput() {
     
     if (activity == 'N') { serialCaseN(); return; }
     if (activity == 'L') { serialCaseL(); return; }
+        if (activity == 'I') {
+      // <I {ip} {subnet} {gateway} {dns}>
+      const char* ipStr = strtokIndex ? strtokIndex : "";
+      const char* subnetStr = "";
+      const char* gwStr = "";
+      const char* dnsStr = "";
+
+      char* t = strtok(NULL, " ");
+      if (t) subnetStr = t;
+      t = strtok(NULL, " ");
+      if (t) gwStr = t;
+      t = strtok(NULL, " ");
+      if (t) dnsStr = t;
+
+      serialCaseI(ipStr, subnetStr, gwStr, dnsStr);
+      return;
+    }
 
     if (activity == 'W') {
       if (strtokIndex) parameter = strtol(strtokIndex, NULL, 16);
@@ -274,5 +329,32 @@ void serialCaseC(const char* ssid, const char* pass) {
     USB_SERIAL.println(F("WiFi reconnect OK."));
   } else {
     USB_SERIAL.println(F("WiFi reconnect FAILED."));
+  }
+}
+
+void serialCaseI(const char* ipStr, const char* subnetStr, const char* gwStr, const char* dnsStr) {
+  if (!tcpEnabled()) {
+    USB_SERIAL.println(F("TCP not enabled/available in this build."));
+    return;
+  }
+
+  if (!ipStr || !subnetStr || !gwStr || !dnsStr || !ipStr[0] || !subnetStr[0] || !gwStr[0] || !dnsStr[0]) {
+    USB_SERIAL.println(F("Usage: <I {ip} {subnet} {gateway} {dns}>"));
+    USB_SERIAL.println(F("Example: <I {192,168,1,200} {255,255,255,0} {192,168,1,1} {192,168,1,1}>"));
+    return;
+  }
+
+  uint8_t ip[4], sn[4], gw[4], dns[4];
+  if (!_parseIp4(ipStr, ip) || !_parseIp4(subnetStr, sn) || !_parseIp4(gwStr, gw) || !_parseIp4(dnsStr, dns)) {
+    USB_SERIAL.println(F("Invalid IP format. Use {a,b,c,d} or { a, b, c, d } (no spaces preferred)."));
+    return;
+  }
+
+  bool ok = tcpSetStaticNetwork(ip, sn, gw, dns);
+  if (ok) {
+    USB_SERIAL.println(F("Static network applied."));
+    tcpPrintNetworkStatus();
+  } else {
+    USB_SERIAL.println(F("Static network NOT applied (transport may not support it, or WiFi locked by DONT_TOUCH_WIFI_CONF)."));
   }
 }

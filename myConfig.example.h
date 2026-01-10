@@ -53,6 +53,12 @@
 // instead of I2C slave mode.
 
 // #define IP_PORT 2560
+// #define USE_DHCP true
+
+// #define IP_ADDRESS      { 192, 168, 10, 36 }
+// #define SUBNET_MASK     { 255, 255, 255, 0 }
+// #define GATEWAY_ADDRESS { 192, 168, 10, 254 }
+// #define DNS_ADDRESS     { 192, 168, 10, 254 }
 
 // #define ENABLE_WIFI false
 // #define DONT_TOUCH_WIFI_CONF
@@ -62,5 +68,4 @@
 // #define WIFI_CONNECT_TIMEOUT 14000
 
 // #define ENABLE_ETHERNET false
-// #define IP_ADDRESS { 192, 168, 1, 200 }
 // #define MAC_ADDRESS { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xEF }

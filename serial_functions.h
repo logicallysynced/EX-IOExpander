@@ -35,5 +35,6 @@ void serialCaseW(unsigned long parameter);
 void serialCaseN();                                  // Network status
 void serialCaseL();                                  // Latency stats
 void serialCaseC(const char* ssid, const char* pass); // Set WiFi creds + reconnect
+void serialCaseI(const char* ipStr, const char* subnetStr, const char* gwStr, const char* dnsStr); // Set static IP
 
 #endif
