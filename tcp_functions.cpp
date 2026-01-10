@@ -640,7 +640,11 @@ void tcpLoop() {
   if (_client && !_client.connected()) {
     USB_SERIAL.println(F("TCP: client disconnected"));
     _client.stop();
-    _client = WiFiClient();   // <--- hard reset the underlying handle
+    #if defined(EXIO_TCP_WIFI)
+      _client = WiFiClient();
+    #elif defined(EXIO_TCP_ETH)
+      _client = EthernetClient();
+    #endif
   }
 
   if (!_client || !_client.connected()) {
