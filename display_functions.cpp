@@ -21,7 +21,10 @@
 #include "globals.h"
 #include "version.h"
 #include "display_functions.h"
-#include "i2c_functions.h"
+
+#if __has_include("tcp_functions.h")
+  #include "tcp_functions.h"
+#endif
 
 char * version;   // Pointer for getting version
 uint8_t versionBuffer[3];   // Array to hold version info to send to device driver
@@ -225,6 +228,12 @@ void startupDisplay() {
   }
   USB_SERIAL.print(F("Available at I2C address 0x"));
   USB_SERIAL.println(i2cAddress, HEX);
+#if __has_include("tcp_functions.h")
+  if (tcpEnabled()) {
+    USB_SERIAL.print(F("TCP server port: "));
+    USB_SERIAL.println(IP_PORT);
+  }
+#endif
 #if defined(HAS_SERVO_LIB)
   USB_SERIAL.print(F("Servo library support for up to "));
   USB_SERIAL.print(MAX_SERVOS);

@@ -16,6 +16,7 @@
 
 #include "display_functions.h"
 #include "pin_io_functions.h"
+#include "servo_functions.h"
 #include "shiftio_functions.h"
 
 // Some Arduino toolchains don't define this; make __has_include safe.
@@ -90,6 +91,51 @@ extern uint8_t numReceivedPins;
 static const uint8_t EXIO_SHIFT_MAX_BYTES = 16;
 static byte responseBuffer[1 + EXIO_SHIFT_MAX_BYTES]; // [status][payload...]
 static uint8_t responseLength = 0;
+
+
+// ------------------------- Background sampling ------------------------------
+// Match CommandStation I2C expectations:
+//  - digital states refreshed ~10ms
+//  - analogue states refreshed ~50ms
+// Servos/fades refresh every 50ms inside processServos()
+
+static uint32_t _lastDigitalSampleUs  = 0;
+static uint32_t _lastAnalogueSampleUs = 0;
+
+static const uint32_t _digitalSamplePeriodUs  = 10000UL;  // 10ms
+static const uint32_t _analogueSamplePeriodUs = 50000UL;  // 50ms
+
+static inline void _samplePinsAndServosIfDue() {
+  // Keep servo animation alive regardless of network traffic
+  processServos();
+
+  if (!setupComplete) return;
+
+  const uint32_t now = micros();
+
+  // Fast path: only run a full scan when needed.
+  // processInputs() scans all enabled input pins and updates:
+  //  - digitalPinStates[]
+  //  - analoguePinStates[]
+  //
+  // To keep it cheap, we call it:
+  //  - every 10ms (covers digital),
+  //  - and also ensure analogue is not starved (>50ms).
+  //
+  // Note: processInputs reads BOTH digital + analogue, but that’s ok; it’s still bounded
+  // and only scans enabled inputs.
+
+  bool doDigital = (uint32_t)(now - _lastDigitalSampleUs)  >= _digitalSamplePeriodUs;
+  bool doAnalog  = (uint32_t)(now - _lastAnalogueSampleUs) >= _analogueSamplePeriodUs;
+
+  if (doDigital || doAnalog) {
+    processInputs();
+
+    if (doDigital) _lastDigitalSampleUs = now;
+    if (doAnalog)  _lastAnalogueSampleUs = now;
+  }
+}
+
 
 // ------------------------- Latency stats ------------------------------------
 
@@ -328,9 +374,7 @@ static void _handleCommand(Stream& s, uint8_t cmd, const uint8_t* payload, uint8
       outboundFlag = EXIOINIT;
       displayEvent = EXIOINIT;
 
-      //uint8_t resp[3] = { EXIOPINS, numDigitalPins, 0 };
       uint8_t resp[3] = { EXIOPINS, numDigitalPins, numAnaloguePins };
-      //_writeFrame(s, EXIOPINS, resp, 3);
 
       if (!_writeFrame(s, EXIOPINS, resp, 3)) {
         #ifdef DIAG_IO
@@ -397,40 +441,25 @@ static void _handleCommand(Stream& s, uint8_t cmd, const uint8_t* payload, uint8
     case EXIORDAN: {
       outboundFlag = EXIORDAN;
 
-      // CommandStation expects exactly numAnaloguePins*2 bytes every time.
       const uint8_t need = (uint8_t)(numAnaloguePins * 2);
-
-      // Provide a safe zero-filled fallback.
-      static uint8_t emptyStates[64] = {0}; // supports up to 32 analogue pins (32*2=64)
+      static uint8_t emptyStates[64] = {0};
 
       const uint8_t* buf = analoguePinStates;
-
-      // If we're not ready or the buffer/bytecount isn't sane, send zeros of the expected size.
       if (!setupComplete || buf == nullptr || analoguePinBytes < need) {
         buf = emptyStates;
       }
 
-      #ifdef DIAG_IO
+      static uint8_t out[1 + 64];
+      out[0] = EXIORDAN;
+      memcpy(&out[1], buf, need);
 
-        USB_SERIAL.print(F("TCP: EXIORDAN tx need="));
-        USB_SERIAL.print(need);
-        USB_SERIAL.print(F(" analoguePinBytes="));
-        USB_SERIAL.print((int)analoguePinBytes);
-        USB_SERIAL.print(F(" setupComplete="));
-        USB_SERIAL.println(setupComplete ? 1 : 0);
-
-      #endif
-
-      //_writeFrame(s, EXIORDAN, buf, need);
-
-      if (!_writeFrame(s, EXIORDAN, buf, need)) {
+      if (!_writeFrame(s, EXIORDAN, out, (uint8_t)(1 + need))) {
         #ifdef DIAG_IO
           USB_SERIAL.println(F("TCP: tx failed, dropping client [EXIORDAN]"));
         #endif
         _client.stop();
         return;
       }
-
       return;
     }
 
@@ -439,22 +468,35 @@ static void _handleCommand(Stream& s, uint8_t cmd, const uint8_t* payload, uint8
       outboundFlag = EXIORDD;
 
       const uint8_t need = (uint8_t)((numDigitalPins + 7) / 8);
-      static uint8_t emptyDig[32] = {0}; // supports up to 256 digital pins (256/8=32)
+      static uint8_t emptyDig[32] = {0};
 
       const uint8_t* buf = digitalPinStates;
       if (!setupComplete || buf == nullptr || digitalPinBytes < need) {
         buf = emptyDig;
       }
 
-      if (!_writeFrame(s, EXIORDD, buf, need)) {
+      // Build payload: [EXIORDD][bytes...]
+      static uint8_t out[1 + 32];
+      out[0] = EXIORDD;
+      memcpy(&out[1], buf, need);
+
+      #ifdef DIAG_IO
+        static uint32_t lastDump = 0;
+        if (millis() - lastDump > 500) {
+          lastDump = millis();
+          USB_SERIAL.print(F("TCP: dig[0]="));
+          USB_SERIAL.println(digitalPinStates[0], BIN);
+        }
+      #endif
+
+
+      if (!_writeFrame(s, EXIORDD, out, (uint8_t)(1 + need))) {
         #ifdef DIAG_IO
           USB_SERIAL.println(F("TCP: tx failed, dropping client [EXIORDD]"));
         #endif
         _client.stop();
         return;
       }
-
-      //_writeFrame(s, EXIORDD, buf, need);
       return;
     }
 
@@ -637,6 +679,19 @@ void tcpBegin() {
 void tcpLoop() {
 #if defined(EXIO_TCP_WIFI) || defined(EXIO_TCP_ETH)
 
+  _samplePinsAndServosIfDue();
+
+  #ifdef DIAG_IO
+    static uint32_t last = 0;
+    if (millis() - last > 1000) {
+      last = millis();
+      USB_SERIAL.print(F("TCP: frames="));
+      USB_SERIAL.print(_tcpFrameCount);
+      USB_SERIAL.print(F(" client="));
+      USB_SERIAL.println((_client && _client.connected()) ? F("yes") : F("no"));
+    }
+  #endif
+
   if (_client && !_client.connected()) {
     USB_SERIAL.println(F("TCP: client disconnected"));
     _client.stop();
@@ -660,6 +715,7 @@ void tcpLoop() {
 
 
   while (_client.available() >= 2) {
+    _samplePinsAndServosIfDue();
     const uint32_t t0 = micros();
 
     uint8_t hdr[2];
