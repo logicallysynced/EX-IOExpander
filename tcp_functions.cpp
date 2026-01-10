@@ -24,12 +24,9 @@
 #endif
 
 // ------------------------- Transport selection ------------------------------
-//
 // Priority order:
 //   1) Ethernet
-//   2) ESP8266 native WiFi (ESP-13)
-//   3) WiFiS3 (UNO R4 WiFi, Portenta C33)
-//   4) Generic WiFi.h
+//   2) WiFi (board-specific first, then generic)
 //
 
 // ---------- Ethernet FIRST ----------
@@ -43,23 +40,32 @@
 // ---------- WiFi fallback ----------
 #if !defined(EXIO_TCP_ETH) && defined(ENABLE_WIFI) && (ENABLE_WIFI == true)
 
-  // ESP8266 (ESP-13)
-  #if defined(ARDUINO_ARCH_ESP8266)
-    #include <ESP8266WiFi.h>
-    #define EXIO_TCP_WIFI 1
-
-  // WiFiS3 (UNO R4 WiFi, Portenta C33)
-  #elif __has_include(<WiFiS3.h>)
+  // UNO R4 WiFi / Portenta C33 / other WiFiS3 boards
+  #if defined(ARDUINO_UNOR4_WIFI) || defined(ARDUINO_PORTENTA_C33)
     #include <WiFiS3.h>
     #define EXIO_TCP_WIFI 1
 
-  // Classic WiFi (ESP32, SAMD, etc.)
+  // ESP8266
+  #elif defined(ARDUINO_ARCH_ESP8266)
+    #include <ESP8266WiFi.h>
+    #define EXIO_TCP_WIFI 1
+
+  // ESP32 / classic WiFi.h
+  #elif defined(ARDUINO_ARCH_ESP32)
+    #include <WiFi.h>
+    #define EXIO_TCP_WIFI 1
+
+  // “Best effort” generic fallback if a core provides one of these
+  #elif __has_include(<WiFiS3.h>)
+    #include <WiFiS3.h>
+    #define EXIO_TCP_WIFI 1
   #elif __has_include(<WiFi.h>)
     #include <WiFi.h>
     #define EXIO_TCP_WIFI 1
   #endif
 
 #endif
+
 
 // ------------------------- Server/client objects ----------------------------
 
@@ -146,39 +152,65 @@ bool tcpEnabled() {
 #if defined(EXIO_TCP_WIFI)
 
 static bool _wifiEnsureConnected() {
-#ifdef DONT_TOUCH_WIFI_CONF
+  // If user says "don't touch", only honor that on ESP cores where an external
+  // sketch/framework might already be managing WiFi. On WiFiS3 boards, you
+  // generally need to call WiFi.begin() yourself.
+#if defined(DONT_TOUCH_WIFI_CONF) && (defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266))
   return (WiFi.status() == WL_CONNECTED);
 #else
   if (WiFi.status() == WL_CONNECTED) return true;
 
-  // ESP32 / ESP8266 only
+  // STA mode where supported
   #if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)
     WiFi.mode(WIFI_STA);
   #endif
 
-  // Hostname (best-effort)
+  // Hostname (only where supported)
   #if defined(ARDUINO_ARCH_ESP32)
     if (strlen(WIFI_HOSTNAME) > 0) WiFi.setHostname(WIFI_HOSTNAME);
   #elif defined(ARDUINO_ARCH_ESP8266)
     if (strlen(WIFI_HOSTNAME) > 0) WiFi.hostname(WIFI_HOSTNAME);
   #endif
+  // WiFiS3: no hostname API (ignore)
 
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   uint32_t start = millis();
   while (WiFi.status() != WL_CONNECTED) {
     if ((millis() - start) > WIFI_CONNECT_TIMEOUT) return false;
-    delay(50);
+    delay(100);
+  }
+
+  // Give DHCP a moment to populate localIP() on some stacks
+  for (uint8_t i = 0; i < 20; i++) {
+    IPAddress ip = WiFi.localIP();
+    if (ip[0] != 0 || ip[1] != 0 || ip[2] != 0 || ip[3] != 0) return true;
+    delay(100);
   }
 
   return true;
 #endif
 }
 
-#endif // EXIO_TCP_WIFI
+#endif  // EXIO_TCP_WIFI
 
 #if defined(EXIO_TCP_ETH)
 
+/*************  ✨ Windsurf Command ⭐  *************/
+/**
+ * @brief Initialises the Ethernet interface.
+ *
+ * This function is called when the TCP server is started. It sets up the
+ * Ethernet interface using the MAC address and IP address defined in
+ * the globals.h file.
+ *
+ * @note Ethernet.begin() is called with the MAC address only, and if this
+ * call fails, the function will call Ethernet.begin() again with both the MAC
+ * address and IP address.
+ *
+ * @see Ethernet.begin()
+ */
+/*******  afc1f365-e1a5-40a8-82ec-42a435222ec7  *******/
 static void _ethBegin() {
   byte mac[] = MAC_ADDRESS;
 
@@ -468,7 +500,7 @@ void tcpPrintNetworkStatus() {
   USB_SERIAL.println(IP_PORT);
 
 #if defined(EXIO_TCP_ETH)
-  USB_SERIAL.println(F("Transport: Ethernet (compiled/active)"));
+  USB_SERIAL.println(F("Transport: Ethernet (Active)"));
   USB_SERIAL.print(F("Local IP: "));
   USB_SERIAL.println(Ethernet.localIP());
 
@@ -482,7 +514,7 @@ void tcpPrintNetworkStatus() {
   #endif
 
 #elif defined(EXIO_TCP_WIFI)
-  USB_SERIAL.println(F("Transport: WiFi (compiled/active)"));
+  USB_SERIAL.println(F("Transport: WiFi (Active)"));
   USB_SERIAL.print(F("WiFi status: "));
   USB_SERIAL.println((WiFi.status() == WL_CONNECTED) ? F("CONNECTED") : F("NOT CONNECTED"));
 

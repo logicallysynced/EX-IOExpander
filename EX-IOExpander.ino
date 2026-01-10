@@ -137,6 +137,7 @@ void setup() {
   _setupAnaloguePinMap();
 
   // Decide comms mode
+
   if (tcpEnabled()) {
     USB_SERIAL.println(F("Comms mode: TCP"));
     USB_SERIAL.print(F("Listening on port "));
