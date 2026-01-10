@@ -1,7 +1,7 @@
 /*
  *  © 2022, Peter Cole. All rights reserved.
  *  © 2023, Peter Cole. All rights reserved.
- *  
+ *
  *  This file is part of EX-IOExpander.
  *
  *  This is free software: you can redistribute it and/or modify
@@ -26,20 +26,20 @@
 * Analogue I/O pins are available as digital inputs or outputs or analogue inputs (depending on architecture).
 */
 
-/*
-* Include required files and libraries.
-*/
 #include <Arduino.h>
 #include "globals.h"
 #include "version.h"
 #include <Wire.h>
+
 #include "pin_io_functions.h"
 #include "display_functions.h"
 #include "i2c_functions.h"
+#include "tcp_functions.h"
 #include "serial_functions.h"
 #include "test_functions.h"
 #include "device_functions.h"
 #include "servo_functions.h"
+#include "shiftio_functions.h"
 
 #ifdef CPU_TYPE_ERROR
 #error Unsupported microcontroller architecture detected, you need to use a supported microcontroller. Refer to the documentation.
@@ -49,40 +49,51 @@
 * Include our CPU specific file
 */
 #if defined(ARDUINO_AVR_NANO) || defined(ARDUINO_AVR_PRO)
-#include "arduino_avr_nano.h"
+  #include "arduino_avr_nano.h"
 #elif defined(ARDUINO_AVR_UNO)
-#include "arduino_avr_uno.h"
+  #include "arduino_avr_uno.h"
 #elif defined(ARDUINO_AVR_MEGA2560) || defined(ARDUINO_AVR_MEGA)
-#include "arduino_avr_mega.h"
+  #include "arduino_avr_mega.h"
 #elif defined(ARDUINO_NUCLEO_F411RE)
-#include "arduino_nucleo_f411re.h"
+  #include "arduino_nucleo_f411re.h"
 #elif defined(ARDUINO_NUCLEO_F412ZG)
-#include "arduino_nucleo_f412zg.h"
+  #include "arduino_nucleo_f412zg.h"
 #elif defined(ARDUINO_ARCH_SAMD)
-#include "arduino_arch_samd.h"
+  #include "arduino_arch_samd.h"
 #elif defined(ARDUINO_BLUEPILL_F103C8)
-#include "arduino_bluepill_f103c8.h"
+  #include "arduino_bluepill_f103c8.h"
+#elif defined(ARDUINO_UNOR4_WIFI) || defined(ARDUINO_UNOR4_MINIMA) || defined(ARDUINO_ARCH_RENESAS)
+  #include "arduino_uno_r4.h"
 #endif
 
-/*
-* Global variables here
-*/
 /*
 * If for some reason the I2C address isn't defined, define our default here.
 */
 #ifndef I2C_ADDRESS
 #define I2C_ADDRESS 0x65
 #endif
+
 uint8_t i2cAddress = I2C_ADDRESS;   // Assign address to a variable for validation and serial input
 uint8_t numPins = TOTAL_PINS;
-uint8_t* analoguePinMap;  // Map which analogue pin's value is in which byte
-bool outputTestState = LOW;   // Flag to set outputs high or low for testing
+uint8_t* analoguePinMap;            // Map which analogue pin's value is in which byte
+bool outputTestState = LOW;         // Flag to set outputs high or low for testing
 
 #ifdef DIAG
   bool diag = true;
 #else
   bool diag = false;
 #endif
+
+static void _setupAnaloguePinMap() {
+  uint8_t analoguePin = 0;
+  for (uint8_t pin = 0; pin < numPins; pin++) {
+    if (bitRead(pinMap[pin].capability, ANALOGUE_INPUT)) {
+      exioPins[pin].analogueLSBByte = analoguePin * 2;
+      analoguePinMap[analoguePin] = pin;
+      analoguePin++;
+    }
+  }
+}
 
 /*
 * Main setup function here.
@@ -91,11 +102,16 @@ void setup() {
 #if defined(ARDUINO_BLUEPILL_F103C8)
   disableJTAG();
 #endif
+
   Serial.begin(115200);
+
   USB_SERIAL.print(F("DCC-EX EX-IOExpander v"));
   USB_SERIAL.println(VERSION);
+
   USB_SERIAL.print(F("Detected device: "));
   USB_SERIAL.println(BOARD_TYPE);
+
+  // Only relevant in I2C mode
   if (getI2CAddress() != 0) {
     i2cAddress = getI2CAddress();
   }
@@ -105,27 +121,52 @@ void setup() {
     USB_SERIAL.println(F(", using myConfig.h instead"));
     i2cAddress = I2C_ADDRESS;
   }
-  USB_SERIAL.print(F("Available at I2C address 0x"));
-  USB_SERIAL.println(i2cAddress, HEX);
+
   setVersion();
   setupPinDetails();
+
   servoDataArray = (ServoData**) calloc(numPins, sizeof(ServoData*));
-  Wire.begin(i2cAddress);
-// If desired and pins defined, disable I2C pullups
-#if defined(DISABLE_I2C_PULLUPS) && defined(I2C_SDA) && defined(I2C_SCL)
-  USB_SERIAL.print(F("Disabling I2C pullups on pins SDA|SCL: "));
-  USB_SERIAL.print(I2C_SDA);
-  USB_SERIAL.print(F("|"));
-  USB_SERIAL.println(I2C_SCL);
-  digitalWrite(I2C_SDA, LOW);
-  digitalWrite(I2C_SCL, LOW);
-#endif
+
   startupDisplay();
-// Need to intialise every pin in INPUT mode (no pull ups) for safe start
+
+  // Need to initialise every pin in INPUT mode (no pull ups) for safe start
   initialisePins();
   USB_SERIAL.println(F("Initialised all pins as input only"));
-  Wire.onReceive(receiveEvent);
-  Wire.onRequest(requestEvent);
+
+  // Build analogue pin mapping table used by EXIOINITA
+  _setupAnaloguePinMap();
+
+  // Decide comms mode
+
+  if (tcpEnabled()) {
+    USB_SERIAL.println(F("Comms mode: TCP"));
+    USB_SERIAL.print(F("Listening on port "));
+    USB_SERIAL.println(IP_PORT);
+
+    // Do NOT start Wire in TCP mode
+    tcpBegin();
+
+  } else {
+    USB_SERIAL.println(F("Comms mode: I2C"));
+    USB_SERIAL.print(F("Available at I2C address 0x"));
+    USB_SERIAL.println(i2cAddress, HEX);
+
+    Wire.begin(i2cAddress);
+
+#if defined(DISABLE_I2C_PULLUPS) && defined(I2C_SDA) && defined(I2C_SCL)
+    USB_SERIAL.print(F("Disabling I2C pullups on pins SDA|SCL: "));
+    USB_SERIAL.print(I2C_SDA);
+    USB_SERIAL.print(F("|"));
+    USB_SERIAL.println(I2C_SCL);
+    digitalWrite(I2C_SDA, LOW);
+    digitalWrite(I2C_SCL, LOW);
+#endif
+
+    Wire.onReceive(receiveEvent);
+    Wire.onRequest(requestEvent);
+  }
+
+  // Optional tests
 #if (TEST_MODE == ANALOGUE_TEST)
   testAnalogue(true);
 #elif (TEST_MODE == INPUT_TEST)
@@ -135,29 +176,28 @@ void setup() {
 #elif (TEST_MODE == PULLUP_TEST)
   testPullup(true);
 #endif
-  uint8_t analoguePin = 0;
-  for (uint8_t pin = 0; pin < numPins; pin++) {
-    if (bitRead(pinMap[pin].capability, ANALOGUE_INPUT)) {
-      exioPins[pin].analogueLSBByte = analoguePin * 2;
-      analoguePinMap[analoguePin] = pin;
-      analoguePin++;
-    }            
-  }
 }
 
 /*
-* Main loop here, just processes our inputs and updates the writeBuffer.
+* Main loop here, processes inputs and updates internal state.
 */
 void loop() {
+  // Service TCP if enabled
+  if (tcpEnabled()) {
+    tcpLoop();
+  }
+
   if (setupComplete) {
     processInputs();
     outputTestState = processOutputTest(outputTestState);
     processServos();
     SuperPin::loop();
   }
+
   if (diag) {
     displayPins();
   }
+
   processSerialInput();
   processDisplayOutput();
 }

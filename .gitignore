@@ -1,4 +1,5 @@
 Release/*
+wokwi/*
 .ino.cpp
 .pioenvs
 .piolibdeps
@@ -8,3 +9,6 @@ Release/*
 .vscode/
 my*.h
 !myConfig.example.h
+wokwi.toml
+.gitignore
+.DS_Store

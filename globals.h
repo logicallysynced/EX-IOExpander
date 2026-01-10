@@ -55,5 +55,8 @@ extern ServoData** servoDataArray;
 extern Servo servoMap[MAX_SERVOS];
 #endif
 extern SuperPin superPinMap[MAX_SUPERPINS];
+extern uint8_t numReceivedPins;
+extern uint8_t displayEvent;
+extern uint8_t displayEventFlag;
 
 #endif

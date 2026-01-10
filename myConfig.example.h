@@ -47,3 +47,25 @@
 // #define DISABLE_I2C_PULLUPS
 
 #endif
+
+// --- TCP mode ---------------------------------------------------------------
+// If either ENABLE_WIFI or ENABLE_ETHERNET is true, IOExpander will run TCP server
+// instead of I2C slave mode.
+
+// #define IP_PORT 2560
+// #define USE_DHCP true
+
+// #define IP_ADDRESS      { 192, 168, 10, 36 }
+// #define SUBNET_MASK     { 255, 255, 255, 0 }
+// #define GATEWAY_ADDRESS { 192, 168, 10, 254 }
+// #define DNS_ADDRESS     { 192, 168, 10, 254 }
+
+// #define ENABLE_WIFI false
+// #define DONT_TOUCH_WIFI_CONF
+// #define WIFI_SSID "Your network name"
+// #define WIFI_PASSWORD "Your network passwd"
+// #define WIFI_HOSTNAME "io_expander"
+// #define WIFI_CONNECT_TIMEOUT 14000
+
+// #define ENABLE_ETHERNET false
+// #define MAC_ADDRESS { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xEF }

@@ -21,12 +21,24 @@
 #include "globals.h"
 #include "test_functions.h"
 #include "i2c_functions.h"
+#include "tcp_functions.h"
 #include "pin_io_functions.h"
 
 bool analogueTesting = false; // Flag that analogue input testing is enabled/disabled
 bool inputTesting = false;    // Flag that digital input testing without pullups is enabled/disabled
 bool outputTesting = false;   // Flag that digital output testing is enabled/disabled
 bool pullupTesting = false;   // Flag that digital input testing with pullups is enabled/disabled
+
+static inline void _disableActiveCommsForTesting() {
+  // In TCP mode, we cannot "disable" networking cleanly across all stacks,
+  // but we *can* disconnect any active client so tests don't fight the CommandStation.
+  if (tcpEnabled()) {
+    tcpEnd();
+    USB_SERIAL.println(F("TCP client disconnected for testing (server still running)."));
+  } else {
+    disableWire();
+  }
+}
 
 /*
 * Testing functions below, just pass true/false to enable/disable the appropriate testing
@@ -35,9 +47,9 @@ bool pullupTesting = false;   // Flag that digital input testing with pullups is
 */
 void testAnalogue(bool enable) {
   if (enable) {
-    USB_SERIAL.println(F("Analogue input testing enabled, I2C connection disabled, diags enabled, reboot once testing complete"));
+    USB_SERIAL.println(F("Analogue input testing enabled, comms disabled, diags enabled, reboot once testing complete"));
     setupComplete = true;
-    disableWire();
+    _disableActiveCommsForTesting();
     testInput(false);
     testOutput(false);
     testPullup(false);
@@ -59,9 +71,9 @@ void testAnalogue(bool enable) {
 
 void testInput(bool enable) {
   if (enable) {
-    USB_SERIAL.println(F("Input testing (no pullups) enabled, I2C connection disabled, diags enabled, reboot once testing complete"));
+    USB_SERIAL.println(F("Input testing (no pullups) enabled, comms disabled, diags enabled, reboot once testing complete"));
     setupComplete = true;
-    disableWire();
+    _disableActiveCommsForTesting();
     testAnalogue(false);
     testOutput(false);
     testPullup(false);
@@ -84,9 +96,9 @@ void testInput(bool enable) {
 
 void testOutput(bool enable) {
   if (enable) {
-    USB_SERIAL.println(F("Output testing enabled, I2C connection disabled, diags enabled, reboot once testing complete"));
+    USB_SERIAL.println(F("Output testing enabled, comms disabled, diags enabled, reboot once testing complete"));
     setupComplete = true;
-    disableWire();
+    _disableActiveCommsForTesting();
     testAnalogue(false);
     testInput(false);
     testPullup(false);
@@ -108,9 +120,9 @@ void testOutput(bool enable) {
 
 void testPullup(bool enable) {
   if (enable) {
-    USB_SERIAL.println(F("Pullup input testing enabled, I2C connection disabled, diags enabled, reboot once testing complete"));
+    USB_SERIAL.println(F("Pullup input testing enabled, comms disabled, diags enabled, reboot once testing complete"));
     setupComplete = true;
-    disableWire();
+    _disableActiveCommsForTesting();
     testAnalogue(false);
     testOutput(false);
     testInput(false);
@@ -133,7 +145,7 @@ void testPullup(bool enable) {
 
 void testServo(uint8_t vpin, uint16_t value, uint8_t profile) {
   if (firstVpin > 0) {
-    USB_SERIAL.println(F("EX-IOExpander has been connected and configured, please disconnect from EX-CommandStation and reboot"));
+    USB_SERIAL.println(F("EX-IOExpander has been connected and configured. Disconnect from EX-CommandStation and reboot before using servo test."));
   } else if (analogueTesting || inputTesting || outputTesting || pullupTesting) {
     USB_SERIAL.println(F("Please disable all other testing first"));
   } else {
@@ -149,7 +161,7 @@ void testServo(uint8_t vpin, uint16_t value, uint8_t profile) {
     if (!setupComplete) {
       setupComplete = true;
     }
-    disableWire();
+    _disableActiveCommsForTesting();
     writeAnalogue(vpin, value, profile);
   }
 }

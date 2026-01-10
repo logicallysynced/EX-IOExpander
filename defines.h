@@ -43,6 +43,23 @@
 #define MAX_SUPERPINS 16
 #define HAS_EEPROM
 #define USE_FAST_WRITES
+// Arduino UNO R4 (Minima / WiFi) - Renesas RA4M1
+#elif defined(ARDUINO_UNOR4_WIFI) || defined(ARDUINO_UNOR4_MINIMA) || defined(ARDUINO_ARCH_RENESAS)
+  #if defined(ARDUINO_UNOR4_WIFI)
+    #define BOARD_TYPE F("UNO R4 WiFi")
+  #elif defined(ARDUINO_UNOR4_MINIMA)
+    #define BOARD_TYPE F("UNO R4 Minima")
+  #else
+    #define BOARD_TYPE F("Renesas (UNO R4 family)")
+  #endif
+
+  // Keep parity with the Uno logical pin count used by EX-IOExpander:
+  // D2..D13 (12 pins) + A0..A3 (4 pins) = 16
+  #define TOTAL_PINS 16
+
+  #define HAS_SERVO_LIB
+  #define MAX_SUPERPINS 16
+  #define HAS_EEPROM
 //  Arduino Mega2560
 #elif defined(ARDUINO_AVR_MEGA2560) || defined(ARDUINO_AVR_MEGA)
 #define BOARD_TYPE F("Mega")
@@ -85,6 +102,42 @@
 #undef USB_SERIAL
 #define USB_SERIAL SerialUSB  // Most SAMD21 clones use native USB on the SAMD21G18 variants
 #endif
+
+// -----------------------------------------------------------------------------
+// Optional TCP mode settings (from myConfig.h)
+// -----------------------------------------------------------------------------
+#ifndef IP_PORT
+#define IP_PORT 2560
+#endif
+
+#ifndef ENABLE_WIFI
+#define ENABLE_WIFI false
+#endif
+
+#ifndef ENABLE_ETHERNET
+#define ENABLE_ETHERNET false
+#endif
+
+#ifndef USE_DHCP
+#define USE_DHCP true
+#endif
+
+#ifndef IP_ADDRESS
+#define IP_ADDRESS { 192, 168, 1, 200 }
+#endif
+
+#ifndef SUBNET_MASK
+#define SUBNET_MASK { 255, 255, 255, 0 }
+#endif
+
+#ifndef GATEWAY_ADDRESS
+#define GATEWAY_ADDRESS { 192, 168, 1, 1 }
+#endif
+
+#ifndef DNS_ADDRESS
+#define DNS_ADDRESS { 192, 168, 1, 1 }
+#endif
+
 
 /////////////////////////////////////////////////////////////////////////////////////
 //  Include myConfig.h or use the example
@@ -168,7 +221,7 @@ struct ServoData {
 #define EXIOINITA 0xE8    // Flag to send analogue pin info
 #define EXIOPINS 0xE9     // Flag we need to send pin counts
 #define EXIOWRAN 0xEA     // Flag we're receiving an analogue write (PWM)
-#define EXIOSHIFTIN  0xEB
+#define EXIOSHIFTIN 0xEB
 #define EXIOSHIFTOUT 0xEC
 #define EXIOERR 0xEF      // Flag something has errored to send to device driver
 
