@@ -13,36 +13,23 @@
 #define TCP_FUNCTIONS_H
 
 #include <Arduino.h>
-#include "globals.h"
 
-// True if TCP mode is compiled+enabled (ENABLE_WIFI or ENABLE_ETHERNET)
+// Public API
 bool tcpEnabled();
-
-// Bring up WiFi/Ethernet and start TCP server on IP_PORT
 void tcpBegin();
-
-// Poll/accept client + process framed requests
 void tcpLoop();
-
-// Stop active TCP client (server continues)
 void tcpEnd();
 
-//
-// Optional TCP diagnostics / serial helpers
-//
-
-// Print current TCP transport and connection details (best effort)
+// Serial/diagnostic helpers (used by new serial commands)
 void tcpPrintNetworkStatus();
 
-// Attempt runtime WiFi reconnect with provided credentials (best effort)
-// Returns true if connected at end, false otherwise.
-// If DONT_TOUCH_WIFI_CONF is defined, will refuse and return false.
-bool tcpWifiReconnect(const char* ssid, const char* pass);
-
-// Latency stats (time spent handling one complete frame: read+dispatch)
+// Latency stats (µs) for framed command handling
 uint32_t tcpGetFrameCount();
 uint32_t tcpGetLastLatencyUs();
 uint32_t tcpGetAvgLatencyUs();
 uint32_t tcpGetMaxLatencyUs();
 
-#endif // TCP_FUNCTIONS_H
+// Runtime WiFi reconnect (best-effort; no-op if WiFi not compiled)
+bool tcpWifiReconnect(const char* ssid, const char* pass);
+
+#endif

@@ -62,6 +62,8 @@
   #include "arduino_arch_samd.h"
 #elif defined(ARDUINO_BLUEPILL_F103C8)
   #include "arduino_bluepill_f103c8.h"
+#elif defined(ARDUINO_UNOR4_WIFI) || defined(ARDUINO_UNOR4_MINIMA) || defined(ARDUINO_ARCH_RENESAS)
+  #include "arduino_uno_r4.h"
 #endif
 
 /*

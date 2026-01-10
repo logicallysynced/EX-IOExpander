@@ -43,6 +43,23 @@
 #define MAX_SUPERPINS 16
 #define HAS_EEPROM
 #define USE_FAST_WRITES
+// Arduino UNO R4 (Minima / WiFi) - Renesas RA4M1
+#elif defined(ARDUINO_UNOR4_WIFI) || defined(ARDUINO_UNOR4_MINIMA) || defined(ARDUINO_ARCH_RENESAS)
+  #if defined(ARDUINO_UNOR4_WIFI)
+    #define BOARD_TYPE F("UNO R4 WiFi")
+  #elif defined(ARDUINO_UNOR4_MINIMA)
+    #define BOARD_TYPE F("UNO R4 Minima")
+  #else
+    #define BOARD_TYPE F("Renesas (UNO R4 family)")
+  #endif
+
+  // Keep parity with the Uno logical pin count used by EX-IOExpander:
+  // D2..D13 (12 pins) + A0..A3 (4 pins) = 16
+  #define TOTAL_PINS 16
+
+  #define HAS_SERVO_LIB
+  #define MAX_SUPERPINS 16
+  #define HAS_EEPROM
 //  Arduino Mega2560
 #elif defined(ARDUINO_AVR_MEGA2560) || defined(ARDUINO_AVR_MEGA)
 #define BOARD_TYPE F("Mega")
